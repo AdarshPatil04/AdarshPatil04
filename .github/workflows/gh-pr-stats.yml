@@ -1,134 +1,35 @@
-name: Update PR Stats (no extension)
+name: Update PR Summary (minimal, validated)
 
 on:
-  schedule:
-    - cron: '0 0 * * 1'   # weekly (UTC)
   workflow_dispatch:
 
 jobs:
-  update-pr-stats:
+  update:
     runs-on: ubuntu-latest
     permissions:
       contents: write
       pull-requests: read
-    env:
-      REPO: ${{ github.repository }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          persist-credentials: true
 
-      - name: Ensure gh is available
+      - name: Ensure gh installed
         run: |
           if ! command -v gh >/dev/null 2>&1; then
-            echo "gh not found; installing..."
             sudo apt-get update -y
             sudo apt-get install -y gh || true
           fi
           gh --version || true
 
-      - name: Fetch PRs with gh api
-        run: |
-          # fetch up to 100 PRs (state=all). For >100 PRs you'd implement paging.
-          gh api -H "Accept: application/vnd.github+json" \
-            /repos/"$REPO"/pulls?state=all&per_page=100 > pr_list.json
-          echo "Fetched PR list: $(jq '. | length' pr_list.json 2>/dev/null || echo '?') items"
-
-      - name: Build markdown table (last 5 PRs) and totals
-        run: |
-          python3 - <<'PY'
-import json, os, datetime
-repo = os.environ.get("REPO", "")
-with open("pr_list.json", "r", encoding="utf-8") as f:
-    prs = json.load(f)
-
-prs_sorted = sorted(prs, key=lambda p: p.get("created_at") or "", reverse=True)
-total = len(prs_sorted)
-open_count = sum(1 for p in prs_sorted if p.get("state") == "open")
-closed_count = sum(1 for p in prs_sorted if p.get("state") == "closed")
-merged_count = sum(1 for p in prs_sorted if p.get("merged_at"))
-
-last_n = prs_sorted[:5]
-
-lines = []
-lines.append(f"**Pull Request summary for `{repo}`**  ")
-lines.append("")
-lines.append(f"- Total PRs fetched: **{total}**  ")
-lines.append(f"- Open: **{open_count}**, Closed: **{closed_count}**, Merged: **{merged_count}**  ")
-lines.append("")
-lines.append("| # | Title | Author | State | Merged at |")
-lines.append("|---|-------|--------|:-----:|:---------:|")
-for p in last_n:
-    num = p.get("number")
-    title = (p.get("title") or "").replace("|", "\\|")
-    url = p.get("html_url")
-    author = p.get("user", {}).get("login", "")
-    state = p.get("state")
-    merged_at = p.get("merged_at") or ""
-    if merged_at:
-        try:
-            merged_at = datetime.datetime.fromisoformat(merged_at.replace("Z", "+00:00")).strftime("%Y-%m-%d")
-        except:
-            pass
-    title_link = f"[{title}]({url})"
-    lines.append(f"| #{num} | {title_link} | {author} | {state} | {merged_at} |")
-
-md = "\n".join(lines) + "\n"
-with open("pr_table.md", "w", encoding="utf-8") as out:
-    out.write(md)
-print("WROTE pr_table.md")
-PY
-
-      - name: Ensure README markers exist
-        run: |
-          README=README.md
-          if [ ! -f "$README" ]; then
-            echo "README.md not found; creating a placeholder"
-            echo "# ${GITHUB_REPOSITORY}" > $README
-            echo "" >> $README
-            echo "<!-- gh-pr-stats-start -->" >> $README
-            echo "<!-- gh-pr-stats-end -->" >> $README
-          fi
-          if ! grep -q "<!-- gh-pr-stats-start -->" README.md; then
-            echo "" >> README.md
-            echo "<!-- gh-pr-stats-start -->" >> README.md
-            echo "<!-- gh-pr-stats-end -->" >> README.md
-          fi
-
-      - name: Insert table into README
-        run: |
-          START="<!-- gh-pr-stats-start -->"
-          END="<!-- gh-pr-stats-end -->"
-          NEW_CONTENT=$(cat pr_table.md)
-          # Build replacement block
-          REPL="${START}\n\n${NEW_CONTENT}\n${END}"
-          # Replace between markers (non-greedy) using awk
-          awk -v start="$START" -v end="$END" -v repl="$REPL" '
-            BEGIN {inside=0}
-            {
-              if (index($0, start) && !inside) {
-                print repl
-                inside=1
-                next
-              }
-              if (index($0, end) && inside) {
-                inside=0
-                next
-              }
-              if (!inside) print $0
-            }
-            END { if (inside) print end }
-          ' README.md > README.tmp && mv README.tmp README.md
-          echo "README.md updated"
-
-      - name: Commit & push changes
+      - name: Fetch PRs (test)
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add README.md pr_table.md || true
-          git commit -m "chore: update PR summary" || echo "No changes to commit"
-          git push
+          gh api -H "Accept: application/vnd.github+json" /repos/"$REPO"/pulls?state=all&per_page=5 > pr_list.json || true
+          echo "pr_list.json size: $(wc -c pr_list.json 2>/dev/null || true)"
+          head -n 5 pr_list.json || true
+
+      - name: Commit (no-op)
+        run: |
+          echo "workflow completed"
