@@ -1,13 +1,16 @@
-name: Update PR Stats
+name: Update PR Stats (no extension)
 
 on:
   schedule:
-    - cron: '0 0 * * 1'   # weekly (UTC). change if you want
-  workflow_dispatch:     # allows manual run
+    - cron: '0 0 * * 1'   # weekly (UTC)
+  workflow_dispatch:
 
 jobs:
   update-pr-stats:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
 
     steps:
       - name: Checkout
@@ -24,22 +27,63 @@ jobs:
           fi
           gh --version || true
 
-      - name: Install gh extension gh-pr-stats
-        run: |
-          # Install the gh extension (if not installed)
-          set -e
-          gh extension install shufo/gh-pr-stats || echo "extension already installed or install failed"
-          gh pr-stats --help || true
-
-      - name: Generate PR stats CSV
+      - name: Fetch PRs with gh api
         env:
           REPO: ${{ github.repository }}
         run: |
-          set -e
-          # Generate PR stats for the repository; output to pr-stats.csv
-          gh pr-stats "$REPO" --format csv > pr-stats.csv
-          echo "Wrote pr-stats.csv (first 20 lines):"
-          sed -n '1,20p' pr-stats.csv || true
+          # fetch up to 100 PRs (all states). If you need >100, you'd page.
+          gh api -H "Accept: application/vnd.github+json" \
+            /repos/"$REPO"/pulls?state=all&per_page=100 > pr_list.json
+          echo "Fetched PR list: $(jq '. | length' pr_list.json 2>/dev/null || echo '?') items"
+
+      - name: Build markdown table (last 5 PRs) and totals
+        run: |
+          python3 - <<'PY'
+import json,sys,datetime
+repo = "${{ github.repository }}"
+with open("pr_list.json","r",encoding="utf-8") as f:
+    prs = json.load(f)
+
+# sort by created_at descending to treat "last" as newest created (could be updated_at or merged_at)
+prs_sorted = sorted(prs, key=lambda p: p.get("created_at") or "", reverse=True)
+
+total = len(prs_sorted)
+open_count = sum(1 for p in prs_sorted if p.get("state")=="open")
+closed_count = sum(1 for p in prs_sorted if p.get("state")=="closed")
+merged_count = sum(1 for p in prs_sorted if p.get("merged_at"))
+
+# last 5
+last_n = prs_sorted[:5]
+
+# build markdown
+lines = []
+lines.append(f"**Pull Request summary for `{repo}`**  ")
+lines.append("")
+lines.append(f"- Total PRs fetched: **{total}**  ")
+lines.append(f"- Open: **{open_count}**, Closed: **{closed_count}**, Merged: **{merged_count}**  ")
+lines.append("")
+lines.append("| # | Title | Author | State | Merged at |")
+lines.append("|---|-------|--------|:-----:|:---------:|")
+for p in last_n:
+    num = p.get("number")
+    title = (p.get("title") or "").replace("|","\\|")
+    url = p.get("html_url")
+    author = p.get("user",{}).get("login","")
+    state = p.get("state")
+    merged_at = p.get("merged_at") or ""
+    if merged_at:
+        # shorten to date
+        try:
+            merged_at = datetime.datetime.fromisoformat(merged_at.replace("Z","+00:00")).strftime("%Y-%m-%d")
+        except:
+            pass
+    title_link = f"[{title}]({url})"
+    lines.append(f"| #{num} | {title_link} | {author} | {state} | {merged_at} |")
+
+md = "\n".join(lines) + "\n"
+open("pr_table.md","w",encoding="utf-8").write(md)
+print("WROTE pr_table.md")
+PY
 
       - name: Ensure README markers exist
         run: |
@@ -51,32 +95,30 @@ jobs:
             echo "<!-- gh-pr-stats-start -->" >> $README
             echo "<!-- gh-pr-stats-end -->" >> $README
           fi
-          # If markers missing, append them at the end
           if ! grep -q "<!-- gh-pr-stats-start -->" README.md; then
             echo "" >> README.md
             echo "<!-- gh-pr-stats-start -->" >> README.md
             echo "<!-- gh-pr-stats-end -->" >> README.md
           fi
 
-      - name: Insert PR stats into README
+      - name: Insert table into README
         run: |
-          set -e
           START="<!-- gh-pr-stats-start -->"
           END="<!-- gh-pr-stats-end -->"
-          CSV_CONTENT="$(sed 's/`/\\`/g' pr-stats.csv)"
-          # build the replacement block
-          NEW_BLOCK="\n\`\`\`csv\n${CSV_CONTENT}\n\`\`\`\n"
-          # Use awk to do a non-greedy replace between markers
-          awk -v start="$START" -v end="$END" -v nb="$NEW_BLOCK" '
+          # read generated md
+          NEW="$(sed 's/[&/\]/\\&/g' pr_table.md)"
+          # create replacement block with new table
+          REPLACEMENT="${START}\n\n${NEW}\n${END}"
+          # use awk to replace between markers (non-greedy)
+          awk -v start="$START" -v end="$END" -v repl="$REPLACEMENT" '
             BEGIN {inside=0}
             {
               if (index($0, start) && !inside) {
-                print start nb
+                print repl
                 inside=1
                 next
               }
               if (index($0, end) && inside) {
-                print end
                 inside=0
                 next
               }
@@ -84,15 +126,14 @@ jobs:
             }
             END { if (inside) print end }
           ' README.md > README.tmp && mv README.tmp README.md
-          echo "README.md updated with PR stats."
+          echo "README.md updated"
 
       - name: Commit & push changes
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -e
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add README.md pr-stats.csv || true
-          git commit -m "chore: update PR stats" || echo "No changes to commit"
+          git add README.md pr_table.md || true
+          git commit -m "chore: update PR summary" || echo "No changes to commit"
           git push
