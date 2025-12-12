@@ -11,6 +11,8 @@ jobs:
     permissions:
       contents: write
       pull-requests: read
+    env:
+      REPO: ${{ github.repository }}
 
     steps:
       - name: Checkout
@@ -28,10 +30,8 @@ jobs:
           gh --version || true
 
       - name: Fetch PRs with gh api
-        env:
-          REPO: ${{ github.repository }}
         run: |
-          # fetch up to 100 PRs (all states). If you need >100, you'd page.
+          # fetch up to 100 PRs (state=all). For >100 PRs you'd implement paging.
           gh api -H "Accept: application/vnd.github+json" \
             /repos/"$REPO"/pulls?state=all&per_page=100 > pr_list.json
           echo "Fetched PR list: $(jq '. | length' pr_list.json 2>/dev/null || echo '?') items"
@@ -39,23 +39,19 @@ jobs:
       - name: Build markdown table (last 5 PRs) and totals
         run: |
           python3 - <<'PY'
-import json,sys,datetime
-repo = "${{ github.repository }}"
-with open("pr_list.json","r",encoding="utf-8") as f:
+import json, os, datetime
+repo = os.environ.get("REPO", "")
+with open("pr_list.json", "r", encoding="utf-8") as f:
     prs = json.load(f)
 
-# sort by created_at descending to treat "last" as newest created (could be updated_at or merged_at)
 prs_sorted = sorted(prs, key=lambda p: p.get("created_at") or "", reverse=True)
-
 total = len(prs_sorted)
-open_count = sum(1 for p in prs_sorted if p.get("state")=="open")
-closed_count = sum(1 for p in prs_sorted if p.get("state")=="closed")
+open_count = sum(1 for p in prs_sorted if p.get("state") == "open")
+closed_count = sum(1 for p in prs_sorted if p.get("state") == "closed")
 merged_count = sum(1 for p in prs_sorted if p.get("merged_at"))
 
-# last 5
 last_n = prs_sorted[:5]
 
-# build markdown
 lines = []
 lines.append(f"**Pull Request summary for `{repo}`**  ")
 lines.append("")
@@ -66,22 +62,22 @@ lines.append("| # | Title | Author | State | Merged at |")
 lines.append("|---|-------|--------|:-----:|:---------:|")
 for p in last_n:
     num = p.get("number")
-    title = (p.get("title") or "").replace("|","\\|")
+    title = (p.get("title") or "").replace("|", "\\|")
     url = p.get("html_url")
-    author = p.get("user",{}).get("login","")
+    author = p.get("user", {}).get("login", "")
     state = p.get("state")
     merged_at = p.get("merged_at") or ""
     if merged_at:
-        # shorten to date
         try:
-            merged_at = datetime.datetime.fromisoformat(merged_at.replace("Z","+00:00")).strftime("%Y-%m-%d")
+            merged_at = datetime.datetime.fromisoformat(merged_at.replace("Z", "+00:00")).strftime("%Y-%m-%d")
         except:
             pass
     title_link = f"[{title}]({url})"
     lines.append(f"| #{num} | {title_link} | {author} | {state} | {merged_at} |")
 
 md = "\n".join(lines) + "\n"
-open("pr_table.md","w",encoding="utf-8").write(md)
+with open("pr_table.md", "w", encoding="utf-8") as out:
+    out.write(md)
 print("WROTE pr_table.md")
 PY
 
@@ -105,12 +101,11 @@ PY
         run: |
           START="<!-- gh-pr-stats-start -->"
           END="<!-- gh-pr-stats-end -->"
-          # read generated md
-          NEW="$(sed 's/[&/\]/\\&/g' pr_table.md)"
-          # create replacement block with new table
-          REPLACEMENT="${START}\n\n${NEW}\n${END}"
-          # use awk to replace between markers (non-greedy)
-          awk -v start="$START" -v end="$END" -v repl="$REPLACEMENT" '
+          NEW_CONTENT=$(cat pr_table.md)
+          # Build replacement block
+          REPL="${START}\n\n${NEW_CONTENT}\n${END}"
+          # Replace between markers (non-greedy) using awk
+          awk -v start="$START" -v end="$END" -v repl="$REPL" '
             BEGIN {inside=0}
             {
               if (index($0, start) && !inside) {
