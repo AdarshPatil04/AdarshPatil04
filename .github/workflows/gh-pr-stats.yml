@@ -2,23 +2,78 @@ name: Update PR Stats
 
 on:
   schedule:
-    - cron: "0 0 * * 1"   # Runs weekly (you can change this)
-  workflow_dispatch:      # Allows manual run
+    - cron: '0 0 * * 1'   # weekly; change if you want
+  workflow_dispatch:     # manual run support
 
 jobs:
-  update:
+  update-pr-stats:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v3
-
-      - uses: yuliang419/gh-pr-stats@v1
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          persist-credentials: true
 
-      - name: Commit changes
+      - name: Ensure gh is available
         run: |
-          git config --local user.email "github-actions@github.com"
-          git config --local user.name "GitHub Actions"
-          git add .
-          git commit -m "Update PR stats" || echo "No changes to commit"
+          if ! command -v gh >/dev/null; then
+            echo "gh not found; installing..."
+            sudo apt-get update
+            sudo apt-get install -y gh
+          fi
+          gh --version
+
+      - name: Install gh extension gh-pr-stats
+        # shufo/gh-pr-stats is a gh extension (not a GitHub Action). Install it.
+        run: |
+          gh extension install shufo/gh-pr-stats || true
+          # show usage to confirm
+          gh pr-stats --help
+
+      - name: Generate PR stats CSV
+        run: |
+          # generate aggregated stats for this repo (change repo if you want other repo)
+          gh pr-stats ${{ github.repository }} --format csv > pr-stats.csv
+          echo "Wrote pr-stats.csv:"
+          sed -n '1,20p' pr-stats.csv || true
+
+      - name: Insert PR stats into README
+        run: |
+          # make sure README exists
+          README=README.md
+          if [ ! -f "$README" ]; then
+            echo "README.md not found; creating a placeholder"
+            echo "# ${GITHUB_REPOSITORY}" > $README
+            echo "" >> $README
+            echo "<!-- gh-pr-stats-start -->" >> $README
+            echo "<!-- gh-pr-stats-end -->" >> $README
+          fi
+
+          python3 - <<'PY'
+import re,sys
+start = "<!-- gh-pr-stats-start -->"
+end = "<!-- gh-pr-stats-end -->"
+with open("pr-stats.csv","r",encoding="utf-8") as f:
+    csv = f.read()
+new_block = f"\n```csv\n{csv}\n```\n"
+md = open("README.md","r",encoding="utf-8").read()
+pattern = re.compile(re.escape(start) + ".*?" + re.escape(end), re.S)
+if pattern.search(md):
+    md = pattern.sub(start + new_block + end, md)
+else:
+    # append at end if markers not found
+    md = md + "\n" + start + new_block + end
+open("README.md","w",encoding="utf-8").write(md)
+print('README.md updated')
+PY
+
+      - name: Commit & push changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md pr-stats.csv || true
+          git commit -m "chore: update PR stats" || echo "no changes to commit"
           git push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
