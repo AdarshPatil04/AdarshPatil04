@@ -2,8 +2,8 @@ name: Update PR Stats
 
 on:
   schedule:
-    - cron: '0 0 * * 1'   # weekly; change if you want
-  workflow_dispatch:     # manual run support
+    - cron: '0 0 * * 1'   # weekly (UTC). change if you want
+  workflow_dispatch:     # allows manual run
 
 jobs:
   update-pr-stats:
@@ -17,30 +17,32 @@ jobs:
 
       - name: Ensure gh is available
         run: |
-          if ! command -v gh >/dev/null; then
+          if ! command -v gh >/dev/null 2>&1; then
             echo "gh not found; installing..."
-            sudo apt-get update
-            sudo apt-get install -y gh
+            sudo apt-get update -y
+            sudo apt-get install -y gh || true
           fi
-          gh --version
+          gh --version || true
 
       - name: Install gh extension gh-pr-stats
-        # shufo/gh-pr-stats is a gh extension (not a GitHub Action). Install it.
         run: |
-          gh extension install shufo/gh-pr-stats || true
-          # show usage to confirm
-          gh pr-stats --help
+          # Install the gh extension (if not installed)
+          set -e
+          gh extension install shufo/gh-pr-stats || echo "extension already installed or install failed"
+          gh pr-stats --help || true
 
       - name: Generate PR stats CSV
+        env:
+          REPO: ${{ github.repository }}
         run: |
-          # generate aggregated stats for this repo (change repo if you want other repo)
-          gh pr-stats ${{ github.repository }} --format csv > pr-stats.csv
-          echo "Wrote pr-stats.csv:"
+          set -e
+          # Generate PR stats for the repository; output to pr-stats.csv
+          gh pr-stats "$REPO" --format csv > pr-stats.csv
+          echo "Wrote pr-stats.csv (first 20 lines):"
           sed -n '1,20p' pr-stats.csv || true
 
-      - name: Insert PR stats into README
+      - name: Ensure README markers exist
         run: |
-          # make sure README exists
           README=README.md
           if [ ! -f "$README" ]; then
             echo "README.md not found; creating a placeholder"
@@ -49,31 +51,48 @@ jobs:
             echo "<!-- gh-pr-stats-start -->" >> $README
             echo "<!-- gh-pr-stats-end -->" >> $README
           fi
+          # If markers missing, append them at the end
+          if ! grep -q "<!-- gh-pr-stats-start -->" README.md; then
+            echo "" >> README.md
+            echo "<!-- gh-pr-stats-start -->" >> README.md
+            echo "<!-- gh-pr-stats-end -->" >> README.md
+          fi
 
-          python3 - <<'PY'
-import re,sys
-start = "<!-- gh-pr-stats-start -->"
-end = "<!-- gh-pr-stats-end -->"
-with open("pr-stats.csv","r",encoding="utf-8") as f:
-    csv = f.read()
-new_block = f"\n```csv\n{csv}\n```\n"
-md = open("README.md","r",encoding="utf-8").read()
-pattern = re.compile(re.escape(start) + ".*?" + re.escape(end), re.S)
-if pattern.search(md):
-    md = pattern.sub(start + new_block + end, md)
-else:
-    # append at end if markers not found
-    md = md + "\n" + start + new_block + end
-open("README.md","w",encoding="utf-8").write(md)
-print('README.md updated')
-PY
+      - name: Insert PR stats into README
+        run: |
+          set -e
+          START="<!-- gh-pr-stats-start -->"
+          END="<!-- gh-pr-stats-end -->"
+          CSV_CONTENT="$(sed 's/`/\\`/g' pr-stats.csv)"
+          # build the replacement block
+          NEW_BLOCK="\n\`\`\`csv\n${CSV_CONTENT}\n\`\`\`\n"
+          # Use awk to do a non-greedy replace between markers
+          awk -v start="$START" -v end="$END" -v nb="$NEW_BLOCK" '
+            BEGIN {inside=0}
+            {
+              if (index($0, start) && !inside) {
+                print start nb
+                inside=1
+                next
+              }
+              if (index($0, end) && inside) {
+                print end
+                inside=0
+                next
+              }
+              if (!inside) print $0
+            }
+            END { if (inside) print end }
+          ' README.md > README.tmp && mv README.tmp README.md
+          echo "README.md updated with PR stats."
 
       - name: Commit & push changes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -e
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add README.md pr-stats.csv || true
-          git commit -m "chore: update PR stats" || echo "no changes to commit"
+          git commit -m "chore: update PR stats" || echo "No changes to commit"
           git push
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
