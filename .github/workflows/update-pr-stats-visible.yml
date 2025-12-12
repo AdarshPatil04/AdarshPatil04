@@ -1,0 +1,114 @@
+name: Update PR Table (always visible)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    env:
+      REPO: ${{ github.repository }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Ensure gh available
+        run: |
+          if ! command -v gh >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y gh || true
+          fi
+          gh --version || true
+
+      - name: Fetch up to 50 PRs
+        run: |
+          gh api -H "Accept: application/vnd.github+json" /repos/"$REPO"/pulls?state=all&per_page=50 > pr_list.json || true
+          echo "pr_list.json size: $(wc -c pr_list.json 2>/dev/null || true)"
+
+      - name: Build visible markdown (table or fallback)
+        run: |
+          python3 - <<'PY'
+import json,os,datetime
+repo = os.environ.get("REPO","")
+prs=[]
+try:
+    with open("pr_list.json","r",encoding="utf-8") as f:
+        prs=json.load(f)
+except:
+    prs=[]
+prs_sorted = sorted(prs, key=lambda p: p.get("created_at") or "", reverse=True)
+total=len(prs_sorted)
+lines=[]
+lines.append("## 📊 Pull Request Stats")
+lines.append("")
+lines.append(f"**Repository:** `{repo}`  ")
+lines.append(f"- Total PRs found (fetched): **{total}**  ")
+lines.append("")
+if total==0:
+    lines.append("_No pull requests were found or the API returned none. If this repo has PRs, check the Actions log for `pr_list.json` preview._")
+else:
+    lines.append("| # | Title | Author | State | Merged |")
+    lines.append("|---|-------|--------|:-----:|:------:|")
+    for p in prs_sorted[:10]:
+        num=p.get("number")
+        t=(p.get("title") or "").replace("|","\\|")
+        url=p.get("html_url")
+        author=p.get("user",{}).get("login","")
+        state=p.get("state")
+        merged_at=p.get("merged_at") or ""
+        if merged_at:
+            try:
+                merged_at=datetime.datetime.fromisoformat(merged_at.replace("Z","+00:00")).strftime("%Y-%m-%d")
+            except:
+                pass
+        lines.append(f"| #{num} | [{t}]({url}) | {author} | {state} | {merged_at} |")
+out="\n".join(lines)+"\n"
+open("pr_table.md","w",encoding="utf-8").write(out)
+print("WROTE pr_table.md", len(out), "chars")
+PY
+
+      - name: Ensure markers in README
+        run: |
+          README=README.md
+          if [ ! -f "$README" ]; then
+            echo "# ${GITHUB_REPOSITORY}" > $README
+            echo "" >> $README
+          fi
+          if ! grep -q "<!-- gh-pr-stats-start -->" README.md; then
+            echo "" >> README.md
+            echo "<!-- gh-pr-stats-start -->" >> README.md
+            echo "<!-- gh-pr-stats-end -->" >> README.md
+          fi
+
+      - name: Insert visible block into README
+        run: |
+          START="<!-- gh-pr-stats-start -->"
+          END="<!-- gh-pr-stats-end -->"
+          NEW=$(sed 's/[&/\]/\\&/g' pr_table.md)
+          REPL="${START}\n\n${NEW}\n${END}"
+          awk -v start="$START" -v end="$END" -v repl="$REPL" '
+            BEGIN {inside=0}
+            {
+              if (index($0, start) && !inside) { print repl; inside=1; next }
+              if (index($0, end) && inside) { inside=0; next }
+              if (!inside) print $0
+            }
+            END { if (inside) print end }
+          ' README.md > README.tmp && mv README.tmp README.md
+          sed -n '1,120p' README.md || true
+
+      - name: Commit & push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md pr_table.md || true
+          git commit -m "chore: update visible PR table" || echo "No changes to commit"
+          git push || echo "git push failed"
