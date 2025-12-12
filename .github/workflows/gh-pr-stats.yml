@@ -1,0 +1,24 @@
+name: Update PR Stats
+
+on:
+  schedule:
+    - cron: "0 0 * * 1"   # Runs weekly (you can change this)
+  workflow_dispatch:      # Allows manual run
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: yuliang419/gh-pr-stats@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Commit changes
+        run: |
+          git config --local user.email "github-actions@github.com"
+          git config --local user.name "GitHub Actions"
+          git add .
+          git commit -m "Update PR stats" || echo "No changes to commit"
+          git push
